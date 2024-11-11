@@ -56,7 +56,7 @@ def train(ctx): # FIX
     # Patch to get WandB names in pytorch_lightning logger since 1.7
     multi = "multi-" if trloader.dataset.multiclass else ''
     kwwandb = dict(project=f"3DMV-{multi}segmentation", group=ctx.obj["group"],
-                   job_type="train", entity="tee-4d")
+                   job_type="train", entity='olavkihle-ntnu')
     wandb.init(**kwwandb)
     wandblog = WandbLogger(**kwwandb, name=wandb.run.name, save_dir=str(logdir))
     # Save full training config (before training in case of crash)
@@ -93,7 +93,7 @@ def test(ctx, eval_net, predict):
     # Patch to get WandB names in pytorch_lightning logger since 1.7
     multi = "multi-" if teloader.dataset.multiclass else ''
     kwwandb = dict(project=f"3DMV-{multi}segmentation", group=ctx.obj["group"],
-                   job_type="eval", entity="tee-4d")
+                   job_type="eval", entity='olavkihle-ntnu')
     wandb.init(**kwwandb)
     wandblog = WandbLogger(**kwwandb, name=wandb.run.name, save_dir=str(logdir))
     # Save full testing config (before testing in case of crash)
