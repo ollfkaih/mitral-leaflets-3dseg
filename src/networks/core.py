@@ -11,12 +11,16 @@ from metrics import MONAI_METRICS
 from utils import LinearCosineLR, TensorList
 
 
-
 class EnhancedLightningModule(pl.LightningModule):
-    def __init__(self, loss=nn.MSELoss(),
-                 optimizer={"name": "Adam"}, lr_scheduler=True,
-                 final_activation=nn.Softmax(dim=1), postprocess=None,
-                 metrics=[]):
+    def __init__(
+        self,
+        loss=nn.MSELoss(),
+        optimizer={"name": "Adam"},
+        lr_scheduler=True,
+        final_activation=nn.Softmax(dim=1),
+        postprocess=None,
+        metrics=[],
+    ):
         super(EnhancedLightningModule, self).__init__()
         self.loss = loss
         self.optimizer_config = optimizer
@@ -25,10 +29,9 @@ class EnhancedLightningModule(pl.LightningModule):
         self._init_postprocess(postprocess)
         self._init_metrics(metrics)
 
-
     def _init_postprocess(self, postprocess):
         # NB: The order of the given function will be the one used to apply the post process
-        #FIXME: Allow to specify transform arguments
+        # FIXME: Allow to specify transform arguments
         if postprocess is None:
             self.postprocess = None
             return
@@ -50,73 +53,86 @@ class EnhancedLightningModule(pl.LightningModule):
         all_metrics = dict(ispc.getmembers(torchmetrics, ispc.isclass))
         all_metrics.update(MONAI_METRICS)
         # We use `nn.ModuleDict` to always be on proper device and such
-        self.metrics = nn.ModuleDict({"mtrain": nn.ModuleDict(),
-                                      "mval": nn.ModuleDict(),
-                                      "mtest": nn.ModuleDict()})
+        self.metrics = nn.ModuleDict(
+            {
+                "mtrain": nn.ModuleDict(),
+                "mval": nn.ModuleDict(),
+                "mtest": nn.ModuleDict(),
+            }
+        )
         if self.postprocess is not None:
-            self.metrics.update({"pmval": nn.ModuleDict(),
-                                 "pmtest": nn.ModuleDict()})
+            self.metrics.update({"pmval": nn.ModuleDict(), "pmtest": nn.ModuleDict()})
+
         def build_metric(name, *args, **kwargs):
             return all_metrics[name](*args, **kwargs)
+
         for m in metrics:
             for mode in self.metrics.keys():
                 if mode == "mtrain" and m["name"] in MONAI_METRICS.keys():
                     # Monai computes with `np.array` so use with parsimony
                     continue
-                metric = build_metric(m["name"], *m.get("args", []), **m.get("kwargs", {}))
-                v = 'v' if "val" in mode else ''
-                p = 'p' if 'p' in mode else '' # Postprocess
-                display_name = f"{p}{v}_{m['display_name']}".strip('_')
+                metric = build_metric(
+                    m["name"], *m.get("args", []), **m.get("kwargs", {})
+                )
+                v = "v" if "val" in mode else ""
+                p = "p" if "p" in mode else ""  # Postprocess
+                display_name = f"{p}{v}_{m['display_name']}".strip("_")
                 self.metrics[mode].update({display_name: metric})
 
     def do_postprocess(self, batch):
         ppreds = []
-        for elt in batch: # Apply element wise in the batch
+        for elt in batch:  # Apply element wise in the batch
             processed = elt
-            for p in self.postprocess: # Post processed function are queued
+            for p in self.postprocess:  # Post processed function are queued
                 processed = p(processed)
             ppreds.append(processed)
         return ppreds
 
     def _update_metrics(self, outs, mode="train"):
-        # "train" key isn't allowed for an `nn.ModuleDict`
         preds, y = outs["preds"], outs["target"]
         metrics = self.metrics[f"m{mode}"]
-        on_step = True if mode == "test" else False
-        on_epoch = False if mode == "test" else True
-        # Distances are not computed for background, we need to set the indexes right
-        is_dist = lambda k: "hdf" in k or "masd" in k
-        def do_update(k, m):
-            if is_dist(k):
-                val = m(preds, y)
-                if val.shape == ():
-                    # Counter PyTorch automatic squeeze of scalars
-                    val = val.unsqueeze(0)
-            else: # Accuracies prefer booleans as target
-                val = m(preds, y.bool())
-            if val.shape == ():
-                self.log_dict({k: val}, on_epoch=on_epoch, on_step=on_step, sync_dist=True)
-                return
-            self.log_dict({f"{k}/{i + is_dist(k)}": val[i] for i in range(len(val))},
-                           on_epoch=on_epoch, on_step=on_step, sync_dist=True)
+
+        # Print the shapes and types of predictions and targets
+        print(f"Mode: {mode}")
+        print(f"Predictions shape: {preds.shape}, dtype: {preds.dtype}")
+        print(f"Targets shape: {y.shape}, dtype: {y.dtype}")
+
         for k, m in metrics.items():
-            do_update(k, m)
-        if "ppreds" in outs.keys():
-            # Re-compute for post-processed predictions
-            metrics, preds = self.metrics[f"pm{mode}"], outs["ppreds"]
-            for k, m in metrics.items():
-                do_update(k, m)
+            # Update the metric with the current batch
+            m.update(preds, y)
+            # Compute the metric value
+            val = m.compute()
+
+            # Print the computed metric value
+            print(f"Metric: {k}, Value: {val}")
+
+            # Log the metric value
+            if val.shape == ():
+                self.log(k, val, on_epoch=True, on_step=False, sync_dist=True)
+            else:
+                for i, v in enumerate(val):
+                    self.log(
+                        f"{k}/{i}", v, on_epoch=True, on_step=False, sync_dist=True
+                    )
+
+            # Reset the metric for the next batch
+            m.reset()
 
     def _log_errs(self, errs, name="loss", on_step=False, on_epoch=True):
-        if isinstance(errs, dict): # Used in VAE for example
-            if 'v' in name:
+        if isinstance(errs, dict):  # Used in VAE for example
+            if "v" in name:
                 errs = {f"v_{k}": v for k, v in errs.items()}
             self.log_dict(errs, prog_bar=True, on_step=on_step, on_epoch=on_epoch)
             return errs[name]
-        self.log(name, errs, prog_bar=True, on_step=on_step, on_epoch=on_epoch,
-                 sync_dist=True)
+        self.log(
+            name,
+            errs,
+            prog_bar=True,
+            on_step=on_step,
+            on_epoch=on_epoch,
+            sync_dist=True,
+        )
         return {name: errs}
-
 
     def _step(self, batch, batch_idx):
         x, y = batch
@@ -132,7 +148,6 @@ class EnhancedLightningModule(pl.LightningModule):
             outs["ppreds"] = torch.stack(self.do_postprocess(outs["preds"]))
         self._update_metrics(outs, mode)
         return outs
-
 
     def training_step(self, batch, batch_idx):
         _, y = batch
@@ -163,7 +178,6 @@ class EnhancedLightningModule(pl.LightningModule):
             preds = self.do_postprocess(preds)
         return preds
 
-
     def training_step_end(self, outs):
         self._step_end(outs)
 
@@ -175,17 +189,19 @@ class EnhancedLightningModule(pl.LightningModule):
 
     def predict_step_end(self, outs):
         # Metrics are for test, we're not logging anything here
-        return outs # outs = preds in this case
-
+        return outs  # outs = preds in this case
 
     def configure_optimizers(self):
         # All torch optimizer
         optims = dict(ispc.getmembers(optim, ispc.isclass))
-        opt = optims[self.optimizer_config.pop("name")](self.parameters(),
-                                                        **self.optimizer_config)
+        opt = optims[self.optimizer_config.pop("name")](
+            self.parameters(), **self.optimizer_config
+        )
 
         if self.lr_scheduler:
-            nb_batches = len(self.trainer._data_connector._train_dataloader_source.dataloader())
+            nb_batches = len(
+                self.trainer._data_connector._train_dataloader_source.dataloader()
+            )
             tot_steps = self.trainer.max_epochs * nb_batches
             lr = opt.defaults["lr"]
             lrs = LinearCosineLR(opt, lr, 100, tot_steps)
@@ -193,17 +209,27 @@ class EnhancedLightningModule(pl.LightningModule):
 
 
 class ListOutputModule(EnhancedLightningModule):
-    """ Extend `EnhancedLightningModule` to handle list of outputs from the network """
-    def __init__(self, out_channels=2, loss=nn.MSELoss(),
-                 optimizer={"name": "Adam"}, lr_scheduler=True,
-                 final_activation=nn.Softmax(dim=1), postprocess=None,
-                 metrics=[]):
+    """Extend `EnhancedLightningModule` to handle list of outputs from the network"""
+
+    def __init__(
+        self,
+        out_channels=2,
+        loss=nn.MSELoss(),
+        optimizer={"name": "Adam"},
+        lr_scheduler=True,
+        final_activation=nn.Softmax(dim=1),
+        postprocess=None,
+        metrics=[],
+    ):
         self.out_channels = out_channels
         super(ListOutputModule, self).__init__(
-                loss=loss, optimizer=optimizer, lr_scheduler=lr_scheduler,
-                final_activation=final_activation,
-                postprocess=postprocess, metrics=metrics
-                )
+            loss=loss,
+            optimizer=optimizer,
+            lr_scheduler=lr_scheduler,
+            final_activation=final_activation,
+            postprocess=postprocess,
+            metrics=metrics,
+        )
 
     def _init_metrics(self, metrics):
         # Metrics are automatically duplicated per out_channels instead of having
@@ -211,34 +237,41 @@ class ListOutputModule(EnhancedLightningModule):
         all_metrics = dict(ispc.getmembers(torchmetrics, ispc.isclass))
         all_metrics.update(MONAI_METRICS)
         # We use `nn.ModuleDict` to always be on proper device and such
-        self.metrics = nn.ModuleDict({"mtrain": nn.ModuleDict(),
-                                      "mval": nn.ModuleDict(),
-                                      "mtest": nn.ModuleDict()})
+        self.metrics = nn.ModuleDict(
+            {
+                "mtrain": nn.ModuleDict(),
+                "mval": nn.ModuleDict(),
+                "mtest": nn.ModuleDict(),
+            }
+        )
         if self.postprocess is not None:
-            self.metrics.update({"pmval": nn.ModuleDict(),
-                                 "pmtest": nn.ModuleDict()})
+            self.metrics.update({"pmval": nn.ModuleDict(), "pmtest": nn.ModuleDict()})
+
         def build_metric(name, *args, **kwargs):
             return all_metrics[name](*args, **kwargs)
+
         for m in metrics:
             for mode in self.metrics.keys():
                 if mode == "mtrain" and m["name"] in MONAI_METRICS.keys():
                     # Monai computes with `np.array` so use with parsimony
                     continue
                 for i in range(self.out_channels):
-                    metric = build_metric(m["name"], *m.get("args", []), **m.get("kwargs", {}))
-                    v = 'v' if "val" in mode else ''
-                    p = 'p' if 'p' in mode else '' # Postprocess
-                    display_name = f"{p}{v}_{m['display_name']}/{i + 1}".strip('_')
+                    metric = build_metric(
+                        m["name"], *m.get("args", []), **m.get("kwargs", {})
+                    )
+                    v = "v" if "val" in mode else ""
+                    p = "p" if "p" in mode else ""  # Postprocess
+                    display_name = f"{p}{v}_{m['display_name']}/{i + 1}".strip("_")
                     self.metrics[mode].update({display_name: metric})
 
     # *_step and *_step_end are the same as mother class
     def _step(self, batch, batch_idx):
         x, ys = batch
-        outs = self.forward(x) # Return `nn.TensorList`
+        outs = self.forward(x)  # Return `nn.TensorList`
         # Softmax is baked in `nn.CrossEntropy`, only do it for preds
         souts = TensorList(*map(self.final_activation, outs))
         # Stack on batch dim
-        #FIXME: For unknown reason, ys is nested of one level here
+        # FIXME: For unknown reason, ys is nested of one level here
         return souts, self.loss(torch.cat(outs, dim=0), torch.cat(ys[0], dim=0))
 
     def _step_end(self, outs, name="loss", mode="train"):
@@ -258,30 +291,33 @@ class ListOutputModule(EnhancedLightningModule):
             preds = TensorList(*map(fmap, preds))
         return preds
 
-
     def _update_metrics(self, outs, mode="train"):
         # "train" key isn't allowed for an `nn.ModuleDict`
-        #FIXME: For unknown reason, ys is nested of one level here
+        # FIXME: For unknown reason, ys is nested of one level here
         preds, yy = outs["preds"], outs["target"][0]
         metrics = self.metrics[f"m{mode}"]
         on_step = True if mode == "test" else False
         on_epoch = False if mode == "test" else True
         is_dist = lambda k: "hdf" in k or "masd" in k
+
         def do_update(k, m, i):
             pred, y = preds[i], yy[i]
             if not is_dist(k):
-                pred, y = pred[:,1], y[:,1]
-            #try:
+                pred, y = pred[:, 1], y[:, 1]
+            # try:
             val = m(pred, y)
-            #except TypeError: # Accuracies prefer booleans as target
+            # except TypeError: # Accuracies prefer booleans as target
             #    val = m(preds[i], yy[i].to(torch.bool))
-            self.log_dict({f"{k}": val}, on_epoch=on_epoch, on_step=on_step, sync_dist=True)
+            self.log_dict(
+                {f"{k}": val}, on_epoch=on_epoch, on_step=on_step, sync_dist=True
+            )
+
         for k, m in metrics.items():
-            i = int(k.split('/')[-1]) - 1
+            i = int(k.split("/")[-1]) - 1
             do_update(k, m, i)
         if "ppreds" in outs.keys():
             # Re-compute for post-processed predictions
             metrics, preds = self.metrics[f"pm{mode}"], outs["ppreds"]
             for k, m in metrics.items():
-                i = int(k.split('/')[-1]) - 1
+                i = int(k.split("/")[-1]) - 1
                 do_update(k, m, i)
